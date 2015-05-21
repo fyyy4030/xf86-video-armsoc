@@ -70,6 +70,11 @@ struct ARMSOCEXARec {
  */
 struct ARMSOCEXARec *InitNullEXA(ScreenPtr pScreen, ScrnInfoPtr pScrn, int fd);
 
+/**
+ * Exynos G2D EXA implementation
+ */
+struct ARMSOCEXARec *InitExynosG2DEXA(ScreenPtr pScreen, ScrnInfoPtr pScrn, int fd);
+
 
 struct ARMSOCEXARec *ARMSOCEXAPTR(ScrnInfoPtr pScrn);
 Bool is_accel_pixmap(struct ARMSOCPixmapPrivRec *priv);

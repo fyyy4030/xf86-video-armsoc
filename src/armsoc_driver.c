@@ -779,6 +779,13 @@ ARMSOCAccelInit(ScreenPtr pScreen)
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 
+	/*
+	 * Try to initialize G2D accelerated EXA first. If that fails
+	 * use the non-accelerated EXA fallback.
+	 */
+	if (!pARMSOC->pARMSOCEXA)
+		pARMSOC->pARMSOCEXA = InitExynosG2DEXA(pScreen, pScrn,
+								pARMSOC->drmFD);
 	if (!pARMSOC->pARMSOCEXA)
 		pARMSOC->pARMSOCEXA = InitNullEXA(pScreen, pScrn,
 								pARMSOC->drmFD);
