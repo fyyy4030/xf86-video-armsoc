@@ -32,7 +32,7 @@
 #include "armsoc_exa.h"
 #include "armsoc_driver.h"
 
-static Bool is_accel_pixmap(struct ARMSOCPixmapPrivRec *priv)
+Bool is_accel_pixmap(struct ARMSOCPixmapPrivRec *priv)
 {
 	/* For pixmaps that are scanout or backing for windows, we
 	 * "accelerate" them by allocating them via GEM. For all other

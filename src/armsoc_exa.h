@@ -39,6 +39,9 @@
 #include "exa.h"
 #include "compat-api.h"
 
+/* Forward declarations: */
+struct ARMSOCPixmapPrivRec;
+
 /**
  * A per-Screen structure used to communicate and coordinate between the
  * ARMSOC X driver and an external EXA sub-module (if loaded).
@@ -69,6 +72,7 @@ struct ARMSOCEXARec *InitNullEXA(ScreenPtr pScreen, ScrnInfoPtr pScrn, int fd);
 
 
 struct ARMSOCEXARec *ARMSOCEXAPTR(ScrnInfoPtr pScrn);
+Bool is_accel_pixmap(struct ARMSOCPixmapPrivRec *priv);
 
 static inline ScrnInfoPtr
 pix2scrn(PixmapPtr pPixmap)
