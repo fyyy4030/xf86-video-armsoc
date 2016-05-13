@@ -40,6 +40,7 @@
 #if defined(EXA_G2D_DEBUG) && (EXA_G2D_DEBUG == 1)
 #define EXA_G2D_DEBUG_SOLID
 #define EXA_G2D_DEBUG_COPY
+#define EXA_G2D_DEBUG_PERF
 #endif
 
 /*
@@ -101,6 +102,45 @@ struct ExynosG2DRec {
  * EXA API documentation:
  * http://cgit.freedesktop.org/xorg/xserver/tree/exa/exa.h
  */
+
+static void perf_record(struct G2DStats *stats, enum e_g2d_exa_operation op,
+	unsigned int accel)
+{
+#if defined(EXA_G2D_DEBUG_PERF)
+	unsigned long *ops;
+
+	switch (op) {
+	case g2d_exa_op_solid:
+		ops = stats->solid_ops;
+		break;
+
+	case g2d_exa_op_copy:
+		ops = stats->copy_ops;
+		break;
+
+	case g2d_exa_op_unset:
+	default:
+		assert(0);
+		return;
+	}
+
+	if (accel)
+		ops[0]++;
+	else
+		ops[1]++;
+#endif
+}
+
+static void perf_stats(const struct G2DStats *stats)
+{
+#if defined(EXA_G2D_DEBUG_PERF)
+	EARLY_INFO_MSG("PERF: EXA solid: accel = %lu, nonaccel = %lu",
+		stats->solid_ops[0], stats->solid_ops[1]);
+
+	EARLY_INFO_MSG("PERF: EXA copy: accel = %lu, nonaccel = %lu",
+		stats->copy_ops[0], stats->copy_ops[1]);
+#endif
+}
 
 static struct ExynosG2DRec*
 G2DPrivFromPixmap(PixmapPtr pPixmap)
@@ -193,13 +233,15 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 #endif
 
 	if (!is_accel_pixmap(pixPriv))
-		return FALSE;
+		goto fail;
 
 	if (alu != GXcopy)
-		return FALSE;
+		goto fail;
 
 	if (planemask != 0xffffffff)
-		return FALSE;
+		goto fail;
+
+	perf_record(&g2dPriv->stats, g2d_exa_op_solid, 1);
 
 	assert(g2dPriv->current_op == g2d_exa_op_unset);
 
@@ -219,6 +261,11 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 	g2dPriv->op_data = solidOp;
 
 	return TRUE;
+
+fail:
+	perf_record(&g2dPriv->stats, g2d_exa_op_solid, 0);
+
+	return FALSE;
 }
 
 static void
@@ -303,16 +350,18 @@ PrepareCopyG2D(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 #endif
 
 	if (!is_accel_pixmap(privSrc))
-		return FALSE;
+		goto fail;
 
 	if (!is_accel_pixmap(privDst))
-		return FALSE;
+		goto fail;
 
 	if (alu != GXcopy)
-		return FALSE;
+		goto fail;
 
 	if (planemask != 0xffffffff)
-		return FALSE;
+		goto fail;
+
+	perf_record(&g2dPriv->stats, g2d_exa_op_copy, 1);
 
 	assert(g2dPriv->current_op == g2d_exa_op_unset);
 
@@ -348,6 +397,11 @@ out:
 	g2dPriv->op_data = copyOp;
 
 	return TRUE;
+
+fail:
+	perf_record(&g2dPriv->stats, g2d_exa_op_copy, 0);
+
+	return FALSE;
 }
 
 static void
@@ -455,6 +509,8 @@ CloseScreen(CLOSE_SCREEN_ARGS_DECL)
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 	struct ExynosG2DRec *pExynosG2D = (struct ExynosG2DRec *)pARMSOC->pARMSOCEXA;
+
+	perf_stats(&pExynosG2D->stats);
 
 	g2d_fini(pExynosG2D->g2d_ctx);
 	exaDriverFini(pScreen);
