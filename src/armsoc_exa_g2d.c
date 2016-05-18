@@ -213,9 +213,6 @@ translate_pixmap_depth(PixmapPtr pPixmap)
     case 8:
         return G2D_COLOR_FMT_A8 | G2D_ORDER_AXRGB;
 
-    case 1:
-        return G2D_COLOR_FMT_A1 | G2D_ORDER_AXRGB;
-
     default:
 		assert(0);
 		return 0;
@@ -235,6 +232,9 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 		pPixmap, translate_gxop(alu), (unsigned int)planemask,
 		!!is_accel_pixmap(pixPriv));
 #endif
+
+	if (pPixmap->drawable.depth < 8)
+		goto fail;
 
 	if (alu != GXcopy)
 		goto fail;
