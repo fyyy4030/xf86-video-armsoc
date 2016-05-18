@@ -35,6 +35,8 @@
 #include <libdrm/exynos_drmif.h>
 #include <exynos/exynos_fimg2d.h>
 
+#include <time.h>
+
 #define EXA_G2D_DEBUG 0
 
 #if defined(EXA_G2D_DEBUG) && (EXA_G2D_DEBUG == 1)
@@ -60,6 +62,8 @@ enum e_g2d_exa_constants {
 
 	/* Limit the buffer size of userptr to 4K. */
 	g2d_exa_userptr_limit = 4 * 1024,
+
+	g2d_userptr_cache_num = 16,
 };
 
 enum e_g2d_exa_flags {
@@ -74,7 +78,8 @@ enum e_g2d_exa_operation {
 };
 
 struct G2DUserPtr {
-	void *addr;
+	PixmapPtr pPixmap;
+
 	unsigned int uses;
 	unsigned long age;
 };
@@ -109,7 +114,10 @@ struct ExynosG2DRec {
 	struct ARMSOCEXARec base;
 	ExaDriverPtr exa;
 	struct g2d_context *g2d_ctx;
+	struct timespec basetime;
 	struct G2DStats stats;
+
+	struct G2DUserPtr userptr_cache[g2d_userptr_cache_num];
 
 	enum e_g2d_exa_operation current_op;
 	void *op_data;
@@ -119,6 +127,21 @@ struct ExynosG2DRec {
  * EXA API documentation:
  * http://cgit.freedesktop.org/xorg/xserver/tree/exa/exa.h
  */
+
+/* Return time difference to 'oldtime' in milliseconds. */
+static unsigned long
+diff_time(const struct timespec *oldtime)
+{
+	struct timespec newtime = { 0 };
+	unsigned long ret;
+
+	clock_gettime(CLOCK_MONOTONIC, &newtime);
+
+	ret = (newtime.tv_sec - oldtime->tv_sec) * 1000;
+	ret += (newtime.tv_nsec - oldtime->tv_nsec) / 1000000;
+
+	return ret;
+}
 
 static void perf_record(struct G2DStats *stats, enum e_g2d_exa_operation op,
 	unsigned int accel)
@@ -167,6 +190,14 @@ G2DPrivFromPixmap(PixmapPtr pPixmap)
 	return (struct ExynosG2DRec*)(pARMSOC->pARMSOCEXA);
 }
 
+static struct ExynosG2DRec*
+G2DPrivFromScreen(ScreenPtr pScreen)
+{
+	ScrnInfoPtr pScrn = xf86ScreenToScrn(pScreen);
+	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
+	return (struct ExynosG2DRec*)(pARMSOC->pARMSOCEXA);
+}
+
 #if defined(EXA_G2D_DEBUG_SOLID) || defined(EXA_G2D_DEBUG_COPY) || defined(EXA_G2D_DEBUG_UNACCEL)
 static const char*
 translate_gxop(unsigned int op)
@@ -209,6 +240,88 @@ translate_gxop(unsigned int op)
 	}
 }
 #endif
+
+/* Add a new entry to the userptr cache. */
+static void
+userptr_add(struct ExynosG2DRec *priv, struct G2DUserPtr *up, PixmapPtr pPixmap)
+{
+	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(pPixmap);
+
+#if defined(EXA_G2D_DEBUG_USERPTR)
+	EARLY_INFO_MSG("DEBUG: UserPtr: registering %p, size = %u",
+		pixPriv->unaccel, pixPriv->unaccel_size);
+#endif
+
+	g2d_userptr_register(priv->g2d_ctx, pixPriv->unaccel, pixPriv->unaccel_size,
+		G2D_USERPTR_FLAG_WRITE | G2D_USERPTR_FLAG_READ);
+
+	up->pPixmap = pPixmap;
+	up->uses = 0;
+}
+
+/* Remove an entry from the userptr cache. */
+static void
+userptr_remove(struct ExynosG2DRec *priv, struct G2DUserPtr *up)
+{
+	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(up->pPixmap);
+
+	pixPriv->priv = NULL;
+	g2d_userptr_unregister(priv->g2d_ctx, pixPriv->unaccel);
+
+#if defined(EXA_G2D_DEBUG_USERPTR)
+	EARLY_INFO_MSG("DEBUG: UserPtr: unregistered %p", pixPriv->unaccel);
+#endif
+
+	up->pPixmap = NULL;
+}
+
+static struct G2DUserPtr*
+userptr_get_free(struct ExynosG2DRec *priv)
+{
+	unsigned int i;
+	unsigned long age;
+	struct G2DUserPtr *free_up, *up;
+
+	free_up = NULL;
+	age = ULONG_MAX;
+
+	for (i = 0; i < g2d_userptr_cache_num; ++i) {
+		up = &priv->userptr_cache[i];
+
+		if (!up->pPixmap)
+			return up;
+
+		if (up->age < age) {
+			age = up->age;
+			free_up = up;
+		}
+	}
+
+	assert(free_up != NULL);
+
+	userptr_remove(priv, up);
+	return up;
+}
+
+static void
+userptr_use(struct ExynosG2DRec *priv, PixmapPtr pPixmap)
+{
+	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(pPixmap);
+	struct G2DUserPtr *up;
+
+	if (pixPriv->priv) {
+		up = pixPriv->priv;
+		goto out;
+	}
+
+	up = userptr_get_free(priv);
+
+	userptr_add(priv, up, pPixmap);
+	pixPriv->priv = up;
+
+out:
+	up->age = diff_time(&priv->basetime);
+}
 
 static unsigned int
 translate_pixmap_depth(PixmapPtr pPixmap)
@@ -274,12 +387,7 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 	if (need_userptr) {
 		solidOp->flags |= g2d_exa_userptr;
 
-#if defined(EXA_G2D_DEBUG_USERPTR)
-		EARLY_INFO_MSG("DEBUG: PrepareSolidG2D: registering %p, size = %u",
-			pixPriv->unaccel, pixPriv->unaccel_size);
-#endif
-		g2d_userptr_register(g2dPriv->g2d_ctx, pixPriv->unaccel,
-			pixPriv->unaccel_size, G2D_USERPTR_FLAG_WRITE);
+		userptr_use(g2dPriv, pPixmap);
 	}
 
 	solidOp->dst.color_mode = translate_pixmap_depth(pPixmap);
@@ -353,7 +461,6 @@ SolidG2D(PixmapPtr pPixmap, int x1, int y1, int x2, int y2)
 static void
 DoneSolidG2D(PixmapPtr pPixmap)
 {
-	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(pPixmap);
 	struct ExynosG2DRec *g2dPriv = G2DPrivFromPixmap(pPixmap);
 	struct SolidG2DOp *solidOp;
 
@@ -373,14 +480,6 @@ DoneSolidG2D(PixmapPtr pPixmap)
 
 out:
 	g2d_exec(g2dPriv->g2d_ctx);
-
-	if (solidOp->flags & g2d_exa_userptr) {
-		g2d_userptr_unregister(g2dPriv->g2d_ctx, pixPriv->unaccel);
-
-#if defined(EXA_G2D_DEBUG_USERPTR)
-		EARLY_INFO_MSG("DEBUG: DoneSolidG2D: unregistered %p", pixPriv->unaccel);
-#endif
-	}
 
 	free(solidOp);
 
@@ -588,6 +687,38 @@ fail:
 	return FALSE;
 }
 
+static void
+DestroyPixmapG2D(ScreenPtr pScreen, void *driverPriv)
+{
+	struct ExynosG2DRec *g2dPriv = G2DPrivFromScreen(pScreen);
+	struct ARMSOCPixmapPrivRec *priv = driverPriv;
+
+	if (priv->priv)
+		userptr_remove(g2dPriv, priv->priv);
+
+	ARMSOCDestroyPixmap(pScreen, driverPriv);
+}
+
+static Bool
+ModifyPixmapHeaderG2D(PixmapPtr pPixmap, int width, int height,
+		int depth, int bitsPerPixel, int devKind,
+		pointer pPixData)
+{
+	struct ExynosG2DRec *g2dPriv = G2DPrivFromPixmap(pPixmap);
+	struct ARMSOCPixmapPrivRec *priv = exaGetPixmapDriverPrivate(pPixmap);
+
+	/*
+	 * Pixmap header modification might change the address and size of the
+	 * underlying buffer. Remove any associated userptr so that we recreate
+	 * the userptr with correct addr and size on the next use.
+	 */
+	if (priv->priv)
+		userptr_remove(g2dPriv, priv->priv);
+
+	return ARMSOCModifyPixmapHeader(pPixmap, width, height, depth,
+		bitsPerPixel, devKind, pPixData);
+}
+
 /**
  * CloseScreen() is called at the end of each server generation and
  * cleans up everything initialised in InitNullEXA()
@@ -595,11 +726,17 @@ fail:
 static Bool
 CloseScreen(CLOSE_SCREEN_ARGS_DECL)
 {
+	unsigned int i;
 	ScrnInfoPtr pScrn = xf86ScreenToScrn(pScreen);
 	struct ARMSOCRec *pARMSOC = ARMSOCPTR(pScrn);
 	struct ExynosG2DRec *pExynosG2D = (struct ExynosG2DRec *)pARMSOC->pARMSOCEXA;
 
 	perf_stats(&pExynosG2D->stats);
+
+	for (i = 0; i < g2d_userptr_cache_num; ++i) {
+		if (pExynosG2D->userptr_cache[i].pPixmap)
+			userptr_remove(pExynosG2D, &pExynosG2D->userptr_cache[i]);
+	}
 
 	g2d_fini(pExynosG2D->g2d_ctx);
 	exaDriverFini(pScreen);
@@ -647,6 +784,7 @@ InitExynosG2DEXA(ScreenPtr pScreen, ScrnInfoPtr pScrn, int fd)
 		goto free_exa;
 
 	pExynosG2D->g2d_ctx = g2d_ctx;
+	clock_gettime(CLOCK_MONOTONIC, &pExynosG2D->basetime);
 
 	exa->exa_major = EXA_VERSION_MAJOR;
 	exa->exa_minor = EXA_VERSION_MINOR;
@@ -661,8 +799,8 @@ InitExynosG2DEXA(ScreenPtr pScreen, ScrnInfoPtr pScrn, int fd)
 	/* Required EXA functions: */
 	exa->WaitMarker = ARMSOCWaitMarker;
 	exa->CreatePixmap2 = ARMSOCCreatePixmap2;
-	exa->DestroyPixmap = ARMSOCDestroyPixmap;
-	exa->ModifyPixmapHeader = ARMSOCModifyPixmapHeader;
+	exa->DestroyPixmap = DestroyPixmapG2D;
+	exa->ModifyPixmapHeader = ModifyPixmapHeaderG2D;
 
 	exa->PrepareAccess = ARMSOCPrepareAccess;
 	exa->FinishAccess = ARMSOCFinishAccess;
