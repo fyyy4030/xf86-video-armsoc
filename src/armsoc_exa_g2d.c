@@ -41,6 +41,7 @@
 #define EXA_G2D_DEBUG_SOLID
 #define EXA_G2D_DEBUG_COPY
 #define EXA_G2D_DEBUG_COMPOSITE
+#define EXA_G2D_DEBUG_USERPTR
 #define EXA_G2D_DEBUG_PERF
 #endif
 
@@ -55,7 +56,8 @@ enum e_g2d_exa_constants {
 };
 
 enum e_g2d_exa_flags {
-	g2d_exa_copy_move = (1 << 0),
+	g2d_exa_userptr		= (1 << 0),
+	g2d_exa_copy_move	= (1 << 1),
 };
 
 enum e_g2d_exa_operation {
@@ -71,6 +73,7 @@ struct G2DStats {
 
 struct SolidG2DOp {
 	PixmapPtr p;
+	unsigned int flags;
 
 	struct g2d_image dst;
 	struct g2d_rect rects[g2d_exa_solid_batch];
@@ -233,9 +236,6 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 		!!is_accel_pixmap(pixPriv));
 #endif
 
-	if (!is_accel_pixmap(pixPriv))
-		goto fail;
-
 	if (alu != GXcopy)
 		goto fail;
 
@@ -250,13 +250,30 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 
 	solidOp->p = pPixmap;
 
+	if (!is_accel_pixmap(pixPriv)) {
+		solidOp->flags |= g2d_exa_userptr;
+
+#if defined(EXA_G2D_DEBUG_USERPTR)
+		EARLY_INFO_MSG("DEBUG: PrepareSolidG2D: registering %p, size = %u",
+			pixPriv->unaccel, pixPriv->unaccel_size);
+#endif
+		g2d_userptr_register(g2dPriv->g2d_ctx, pixPriv->unaccel,
+			pixPriv->unaccel_size, G2D_USERPTR_FLAG_WRITE);
+	}
+
 	solidOp->dst.color_mode = translate_pixmap_depth(pPixmap);
 	solidOp->dst.width = pPixmap->drawable.width;
 	solidOp->dst.height = pPixmap->drawable.height;
 	solidOp->dst.stride = exaGetPixmapPitch(pPixmap);
 	solidOp->dst.color = fg;
-	solidOp->dst.buf_type = G2D_IMGBUF_GEM;
-	solidOp->dst.bo[0] = armsoc_bo_handle(pixPriv->bo);
+
+	if (solidOp->flags & g2d_exa_userptr) {
+		solidOp->dst.buf_type = G2D_IMGBUF_USERPTR;
+		solidOp->dst.user_ptr[0] = (uint64_t)(uintptr_t)pixPriv->unaccel;
+	} else {
+		solidOp->dst.buf_type = G2D_IMGBUF_GEM;
+		solidOp->dst.bo[0] = armsoc_bo_handle(pixPriv->bo);
+	}
 
 	g2dPriv->current_op = g2d_exa_op_solid;
 	g2dPriv->op_data = solidOp;
@@ -308,6 +325,7 @@ SolidG2D(PixmapPtr pPixmap, int x1, int y1, int x2, int y2)
 static void
 DoneSolidG2D(PixmapPtr pPixmap)
 {
+	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(pPixmap);
 	struct ExynosG2DRec *g2dPriv = G2DPrivFromPixmap(pPixmap);
 	struct SolidG2DOp *solidOp;
 
@@ -327,6 +345,14 @@ DoneSolidG2D(PixmapPtr pPixmap)
 
 out:
 	g2d_exec(g2dPriv->g2d_ctx);
+
+	if (solidOp->flags & g2d_exa_userptr) {
+		g2d_userptr_unregister(g2dPriv->g2d_ctx, pixPriv->unaccel);
+
+#if defined(EXA_G2D_DEBUG_USERPTR)
+		EARLY_INFO_MSG("DEBUG: DoneSolidG2D: unregistered %p", pixPriv->unaccel);
+#endif
+	}
 
 	free(solidOp);
 
