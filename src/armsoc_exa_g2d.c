@@ -180,7 +180,7 @@ translate_gxop(unsigned int op)
 	case GXorReverse:			/* 0xb: src OR NOT dst */
 		return "or/reverse";
 	case GXcopyInverted:		/* 0xc: NOT src */
-		return "copy/inverred";
+		return "copy/inverted";
 	case GXorInverted:			/* 0xd: NOT src OR dst */
 		return "or/inverted";
 	case GXnand:				/* 0xe: NOT src OR NOT dst */
