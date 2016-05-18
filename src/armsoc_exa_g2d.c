@@ -54,6 +54,12 @@
 enum e_g2d_exa_constants {
 	g2d_exa_solid_batch = 8,
 	g2d_exa_copy_batch = 8,
+
+	/* Total size of the (kernel) userptr pool in bytes. */
+	g2d_exa_userptr_pool = 64 * 1024 * 1024,
+
+	/* Limit the buffer size of userptr to 4K. */
+	g2d_exa_userptr_limit = 4 * 1024,
 };
 
 enum e_g2d_exa_flags {
@@ -65,6 +71,12 @@ enum e_g2d_exa_operation {
 	g2d_exa_op_unset,
 	g2d_exa_op_solid,
 	g2d_exa_op_copy,
+};
+
+struct G2DUserPtr {
+	void *addr;
+	unsigned int uses;
+	unsigned long age;
 };
 
 struct G2DStats {
@@ -226,6 +238,7 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(pPixmap);
 	struct ExynosG2DRec *g2dPriv = G2DPrivFromPixmap(pPixmap);
 	struct SolidG2DOp *solidOp;
+	Bool need_userptr = FALSE;
 
 #if defined(EXA_G2D_DEBUG_SOLID)
 	EARLY_INFO_MSG("DEBUG: PrepareSolidG2D: pixmap = %p, alu = %s, "
@@ -236,6 +249,13 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 
 	if (pPixmap->drawable.depth < 8)
 		goto fail;
+
+	if (!is_accel_pixmap(pixPriv)) {
+		if (pixPriv->unaccel_size > g2d_exa_userptr_limit)
+			goto fail;
+
+		need_userptr = TRUE;
+	}
 
 	if (alu != GXcopy)
 		goto fail;
@@ -251,7 +271,7 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 
 	solidOp->p = pPixmap;
 
-	if (!is_accel_pixmap(pixPriv)) {
+	if (need_userptr) {
 		solidOp->flags |= g2d_exa_userptr;
 
 #if defined(EXA_G2D_DEBUG_USERPTR)
