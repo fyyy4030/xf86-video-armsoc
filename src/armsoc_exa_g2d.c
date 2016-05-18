@@ -43,6 +43,7 @@
 #define EXA_G2D_DEBUG_COMPOSITE
 #define EXA_G2D_DEBUG_USERPTR
 #define EXA_G2D_DEBUG_PERF
+#define EXA_G2D_DEBUG_UNACCEL
 #endif
 
 /*
@@ -154,7 +155,7 @@ G2DPrivFromPixmap(PixmapPtr pPixmap)
 	return (struct ExynosG2DRec*)(pARMSOC->pARMSOCEXA);
 }
 
-#if defined(EXA_G2D_DEBUG_SOLID) || defined(EXA_G2D_DEBUG_COPY)
+#if defined(EXA_G2D_DEBUG_SOLID) || defined(EXA_G2D_DEBUG_COPY) || defined(EXA_G2D_DEBUG_UNACCEL)
 static const char*
 translate_gxop(unsigned int op)
 {
@@ -281,6 +282,13 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 	return TRUE;
 
 fail:
+#if defined(EXA_G2D_DEBUG_UNACCEL)
+	EARLY_INFO_MSG("DEBUG: PrepareSolidG2D: unaccel: pixmap = %p, "
+		"alu = %s, planemask = 0x%x, depth = %d, accel = %u",
+		pPixmap, translate_gxop(alu), (unsigned int)planemask,
+		pPixmap->drawable.depth, !!is_accel_pixmap(pixPriv));
+#endif
+
 	perf_record(&g2dPriv->stats, g2d_exa_op_solid, 0);
 
 	return FALSE;
@@ -426,6 +434,14 @@ out:
 	return TRUE;
 
 fail:
+#if defined(EXA_G2D_DEBUG_UNACCEL)
+	EARLY_INFO_MSG("DEBUG: PrepareCopyG2D: unaccel: src = %p, dst = %p, "
+		"alu = %s, planemask = 0x%x, src_depth = %d, dst_depth = %d, "
+		"src_accel = %u, dst_accel = %u", pSrc, pDst, translate_gxop(alu),
+		(unsigned int)planemask, pSrc->drawable.depth, pDst->drawable.depth,
+		!!is_accel_pixmap(privSrc), !!is_accel_pixmap(privDst));
+#endif
+
 	perf_record(&g2dPriv->stats, g2d_exa_op_copy, 0);
 
 	return FALSE;
