@@ -40,6 +40,7 @@
 #if defined(EXA_G2D_DEBUG) && (EXA_G2D_DEBUG == 1)
 #define EXA_G2D_DEBUG_SOLID
 #define EXA_G2D_DEBUG_COPY
+#define EXA_G2D_DEBUG_COMPOSITE
 #define EXA_G2D_DEBUG_PERF
 #endif
 
@@ -485,17 +486,43 @@ out:
 }
 
 static Bool
-CheckCompositeFail(int op, PicturePtr pSrcPicture, PicturePtr pMaskPicture,
+CheckCompositeG2D(int op, PicturePtr pSrcPicture, PicturePtr pMaskPicture,
 		PicturePtr pDstPicture)
 {
-	return FALSE;
+	return TRUE;
 }
 
 static Bool
-PrepareCompositeFail(int op, PicturePtr pSrcPicture, PicturePtr pMaskPicture,
+PrepareCompositeG2D(int op, PicturePtr pSrcPicture, PicturePtr pMaskPicture,
 		PicturePtr pDstPicture, PixmapPtr pSrc,
 		PixmapPtr pMask, PixmapPtr pDst)
 {
+	struct ARMSOCPixmapPrivRec *privDst = exaGetPixmapDriverPrivate(pDst);
+	struct ARMSOCPixmapPrivRec *privSrc;
+
+#if defined(EXA_G2D_DEBUG_COMPOSITE)
+	EARLY_INFO_MSG("DEBUG: PrepareCompositeG2D: op = %s, src/pic = %p, msk/pic = %p, "
+		"dst/pic = %p, msk = %p, dst = %p, dst_accel = %u",
+		translate_gxop(op), pSrcPicture, pMaskPicture, pDstPicture, pMask, pDst,
+		!!is_accel_pixmap(privDst));
+#endif
+
+	if (pSrc) {
+		privSrc = exaGetPixmapDriverPrivate(pSrc);
+
+#if defined(EXA_G2D_DEBUG_COMPOSITE)
+		EARLY_INFO_MSG("DEBUG: PrepareCompositeG2D: src = %p, src_accel = %u",
+			pSrc, !!is_accel_pixmap(privSrc));
+#endif
+
+		if (!is_accel_pixmap(privSrc))
+			goto fail;
+	}
+
+	if (!is_accel_pixmap(privDst))
+		goto fail;
+
+fail:
 	return FALSE;
 }
 
@@ -588,8 +615,8 @@ InitExynosG2DEXA(ScreenPtr pScreen, ScrnInfoPtr pScrn, int fd)
 	exa->DoneSolid = DoneSolidG2D;
 
 	/* Always fallback for software operations for composite for now. */
-	exa->CheckComposite = CheckCompositeFail;
-	exa->PrepareComposite = PrepareCompositeFail;
+	exa->CheckComposite = CheckCompositeG2D;
+	exa->PrepareComposite = PrepareCompositeG2D;
 
 	if (!exaDriverInit(pScreen, exa)) {
 		ERROR_MSG("exaDriverInit failed");
