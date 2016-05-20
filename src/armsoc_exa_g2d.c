@@ -406,9 +406,7 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 	assert(g2dPriv->current_op == g2d_exa_op_unset);
 
 	solidOp = calloc(1, sizeof(struct SolidG2DOp));
-
 	solidOp->pDst = pPixmap;
-	solidOp->flags = flags;
 
 	if (flags & g2d_exa_dst_userptr)
 		userptr_ref(g2dPriv, pPixmap);
@@ -426,6 +424,8 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 		solidOp->dst.buf_type = G2D_IMGBUF_GEM;
 		solidOp->dst.bo[0] = armsoc_bo_handle(pixPriv->bo);
 	}
+
+	solidOp->flags = flags;
 
 	g2dPriv->current_op = g2d_exa_op_solid;
 	g2dPriv->op_data = solidOp;
@@ -560,10 +560,8 @@ PrepareCopyG2D(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 	assert(g2dPriv->current_op == g2d_exa_op_unset);
 
 	copyOp = calloc(1, sizeof(struct CopyG2DOp));
-
 	copyOp->pSrc = pSrc;
 	copyOp->pDst = pDst;
-	copyOp->flags = flags;
 
 	if (flags & g2d_exa_src_userptr)
 		userptr_ref(g2dPriv, pSrc);
@@ -586,7 +584,8 @@ PrepareCopyG2D(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 	 * then we can skip setup of the dst G2D image.
 	 */
 	if (pSrc == pDst) {
-		copyOp->flags |= g2d_exa_copy_move;
+		flags &= ~g2d_exa_dst_userptr;
+		flags |= g2d_exa_copy_move;
 		goto out;
 	}
 
@@ -607,6 +606,8 @@ PrepareCopyG2D(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 	}
 
 out:
+	copyOp->flags = flags;
+
 	g2dPriv->current_op = g2d_exa_op_copy;
 	g2dPriv->op_data = copyOp;
 
