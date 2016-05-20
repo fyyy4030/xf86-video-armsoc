@@ -67,8 +67,9 @@ enum e_g2d_exa_constants {
 };
 
 enum e_g2d_exa_flags {
-	g2d_exa_userptr		= (1 << 0),
-	g2d_exa_copy_move	= (1 << 1),
+	g2d_exa_dst_userptr		= (1 << 0),
+	g2d_exa_src_userptr		= (1 << 1),
+	g2d_exa_copy_move		= (1 << 2),
 };
 
 enum e_g2d_exa_operation {
@@ -90,7 +91,7 @@ struct G2DStats {
 };
 
 struct SolidG2DOp {
-	PixmapPtr p;
+	PixmapPtr pDst;
 	unsigned int flags;
 
 	struct g2d_image dst;
@@ -99,7 +100,7 @@ struct SolidG2DOp {
 };
 
 struct CopyG2DOp {
-	PixmapPtr p;
+	PixmapPtr pSrc, pDst;
 	unsigned int flags;
 
 	struct g2d_image src;
@@ -263,7 +264,12 @@ userptr_add(struct ExynosG2DRec *priv, struct G2DUserPtr *up, PixmapPtr pPixmap)
 static void
 userptr_remove(struct ExynosG2DRec *priv, struct G2DUserPtr *up)
 {
-	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(up->pPixmap);
+	struct ARMSOCPixmapPrivRec *pixPriv;
+
+	assert(up->uses == 0);
+	assert(up->pPixmap != NULL);
+
+	pixPriv = exaGetPixmapDriverPrivate(up->pPixmap);
 
 	pixPriv->priv = NULL;
 	g2d_userptr_unregister(priv->g2d_ctx, pixPriv->unaccel);
@@ -288,6 +294,9 @@ userptr_get_free(struct ExynosG2DRec *priv)
 	for (i = 0; i < g2d_userptr_cache_num; ++i) {
 		up = &priv->userptr_cache[i];
 
+		if (up->uses != 0)
+			continue;
+
 		if (!up->pPixmap)
 			return up;
 
@@ -299,12 +308,12 @@ userptr_get_free(struct ExynosG2DRec *priv)
 
 	assert(free_up != NULL);
 
-	userptr_remove(priv, up);
-	return up;
+	userptr_remove(priv, free_up);
+	return free_up;
 }
 
 static void
-userptr_use(struct ExynosG2DRec *priv, PixmapPtr pPixmap)
+userptr_ref(struct ExynosG2DRec *priv, PixmapPtr pPixmap)
 {
 	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(pPixmap);
 	struct G2DUserPtr *up;
@@ -321,6 +330,22 @@ userptr_use(struct ExynosG2DRec *priv, PixmapPtr pPixmap)
 
 out:
 	up->age = diff_time(&priv->basetime);
+	up->uses++;
+}
+
+static void
+userptr_unref(struct ExynosG2DRec *priv, PixmapPtr pPixmap)
+{
+	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(pPixmap);
+	struct G2DUserPtr *up;
+
+	if (!pixPriv->priv)
+		return;
+
+	up = pixPriv->priv;
+
+	assert(up->uses > 0);
+	up->uses--;
 }
 
 static unsigned int
@@ -351,7 +376,7 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 	struct ARMSOCPixmapPrivRec *pixPriv = exaGetPixmapDriverPrivate(pPixmap);
 	struct ExynosG2DRec *g2dPriv = G2DPrivFromPixmap(pPixmap);
 	struct SolidG2DOp *solidOp;
-	Bool need_userptr = FALSE;
+	unsigned int flags = 0;
 
 #if defined(EXA_G2D_DEBUG_SOLID)
 	EARLY_INFO_MSG("DEBUG: PrepareSolidG2D: pixmap = %p, alu = %s, "
@@ -367,7 +392,7 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 		if (pixPriv->unaccel_size > g2d_exa_userptr_limit)
 			goto fail;
 
-		need_userptr = TRUE;
+		flags |= g2d_exa_dst_userptr;
 	}
 
 	if (alu != GXcopy)
@@ -382,13 +407,11 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 
 	solidOp = calloc(1, sizeof(struct SolidG2DOp));
 
-	solidOp->p = pPixmap;
+	solidOp->pDst = pPixmap;
+	solidOp->flags = flags;
 
-	if (need_userptr) {
-		solidOp->flags |= g2d_exa_userptr;
-
-		userptr_use(g2dPriv, pPixmap);
-	}
+	if (flags & g2d_exa_dst_userptr)
+		userptr_ref(g2dPriv, pPixmap);
 
 	solidOp->dst.color_mode = translate_pixmap_depth(pPixmap);
 	solidOp->dst.width = pPixmap->drawable.width;
@@ -396,7 +419,7 @@ PrepareSolidG2D(PixmapPtr pPixmap, int alu, Pixel planemask, Pixel fg)
 	solidOp->dst.stride = exaGetPixmapPitch(pPixmap);
 	solidOp->dst.color = fg;
 
-	if (solidOp->flags & g2d_exa_userptr) {
+	if (flags & g2d_exa_dst_userptr) {
 		solidOp->dst.buf_type = G2D_IMGBUF_USERPTR;
 		solidOp->dst.user_ptr[0] = (uint64_t)(uintptr_t)pixPriv->unaccel;
 	} else {
@@ -448,7 +471,7 @@ SolidG2D(PixmapPtr pPixmap, int x1, int y1, int x2, int y2)
 
 	rect = &solidOp->rects[solidOp->num_rects];
 
-	assert(pPixmap == solidOp->p);
+	assert(pPixmap == solidOp->pDst);
 
 	rect->x = x1;
 	rect->y = y1;
@@ -472,6 +495,8 @@ DoneSolidG2D(PixmapPtr pPixmap)
 
 	solidOp = g2dPriv->op_data;
 
+	assert(pPixmap == solidOp->pDst);
+
 	if (solidOp->num_rects == 0)
 		goto out;
 
@@ -480,6 +505,9 @@ DoneSolidG2D(PixmapPtr pPixmap)
 
 out:
 	g2d_exec(g2dPriv->g2d_ctx);
+
+	if (solidOp->flags & g2d_exa_dst_userptr)
+		userptr_unref(g2dPriv, pPixmap);
 
 	free(solidOp);
 
@@ -495,6 +523,7 @@ PrepareCopyG2D(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 	struct ARMSOCPixmapPrivRec *privDst = exaGetPixmapDriverPrivate(pDst);
 	struct ExynosG2DRec *g2dPriv = G2DPrivFromPixmap(pSrc);
 	struct CopyG2DOp *copyOp;
+	unsigned int flags = 0;
 
 #if defined(EXA_G2D_DEBUG_COPY)
 	EARLY_INFO_MSG("DEBUG: PrepareCopyG2D: src = %p, dst = %p, alu = %s, "
@@ -503,11 +532,22 @@ PrepareCopyG2D(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 		!!is_accel_pixmap(privSrc), !!is_accel_pixmap(privDst));
 #endif
 
-	if (!is_accel_pixmap(privSrc))
+	if (pSrc->drawable.depth < 8 || pDst->drawable.depth < 8)
 		goto fail;
 
-	if (!is_accel_pixmap(privDst))
-		goto fail;
+	if (!is_accel_pixmap(privSrc)) {
+		if (privSrc->unaccel_size > g2d_exa_userptr_limit)
+			goto fail;
+
+		flags |= g2d_exa_src_userptr;
+	}
+
+	if (!is_accel_pixmap(privDst)) {
+		if (privDst->unaccel_size > g2d_exa_userptr_limit)
+			goto fail;
+
+		flags |= g2d_exa_dst_userptr;
+	}
 
 	if (alu != GXcopy)
 		goto fail;
@@ -521,14 +561,25 @@ PrepareCopyG2D(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 
 	copyOp = calloc(1, sizeof(struct CopyG2DOp));
 
-	copyOp->p = pDst;
+	copyOp->pSrc = pSrc;
+	copyOp->pDst = pDst;
+	copyOp->flags = flags;
+
+	if (flags & g2d_exa_src_userptr)
+		userptr_ref(g2dPriv, pSrc);
 
 	copyOp->src.color_mode = translate_pixmap_depth(pSrc);
 	copyOp->src.width = pSrc->drawable.width;
 	copyOp->src.height = pSrc->drawable.height;
 	copyOp->src.stride = exaGetPixmapPitch(pSrc);
-	copyOp->src.buf_type = G2D_IMGBUF_GEM;
-	copyOp->src.bo[0] = armsoc_bo_handle(privSrc->bo);
+
+	if (flags & g2d_exa_src_userptr) {
+		copyOp->src.buf_type = G2D_IMGBUF_USERPTR;
+		copyOp->src.user_ptr[0] = (uint64_t)(uintptr_t)privSrc->unaccel;
+	} else {
+		copyOp->src.buf_type = G2D_IMGBUF_GEM;
+		copyOp->src.bo[0] = armsoc_bo_handle(privSrc->bo);
+	}
 
 	/*
 	 * If this is a move operation (source == destination pixmap),
@@ -539,12 +590,21 @@ PrepareCopyG2D(PixmapPtr pSrc, PixmapPtr pDst, int xdir, int ydir,
 		goto out;
 	}
 
+	if (flags & g2d_exa_dst_userptr)
+		userptr_ref(g2dPriv, pDst);
+
 	copyOp->dst.color_mode = translate_pixmap_depth(pDst);
 	copyOp->dst.width = pDst->drawable.width;
 	copyOp->dst.height = pDst->drawable.height;
 	copyOp->dst.stride = exaGetPixmapPitch(pDst);
-	copyOp->dst.buf_type = G2D_IMGBUF_GEM;
-	copyOp->dst.bo[0] = armsoc_bo_handle(privDst->bo);
+
+	if (flags & g2d_exa_dst_userptr) {
+		copyOp->dst.buf_type = G2D_IMGBUF_USERPTR;
+		copyOp->dst.user_ptr[0] = (uint64_t)(uintptr_t)privDst->unaccel;
+	} else {
+		copyOp->dst.buf_type = G2D_IMGBUF_GEM;
+		copyOp->dst.bo[0] = armsoc_bo_handle(privDst->bo);
+	}
 
 out:
 	g2dPriv->current_op = g2d_exa_op_copy;
@@ -599,7 +659,7 @@ CopyG2D(PixmapPtr pDstPixmap, int srcX, int srcY, int dstX, int dstY,
 	src_rect = &copyOp->src_rects[copyOp->num_rects];
 	dst_rect = &copyOp->dst_rects[copyOp->num_rects];
 
-	assert(pDstPixmap == copyOp->p);
+	assert(pDstPixmap == copyOp->pDst);
 
 	src_rect->x = srcX;
 	src_rect->y = srcY;
@@ -626,6 +686,8 @@ DoneCopyG2D(PixmapPtr pDstPixmap)
 
 	copyOp = g2dPriv->op_data;
 
+	assert(pDstPixmap == copyOp->pDst);
+
 	if (copyOp->num_rects == 0)
 		goto out;
 
@@ -639,6 +701,12 @@ DoneCopyG2D(PixmapPtr pDstPixmap)
 
 out:
 	g2d_exec(g2dPriv->g2d_ctx);
+
+	if (copyOp->flags & g2d_exa_src_userptr)
+		userptr_unref(g2dPriv, copyOp->pSrc);
+
+	if (copyOp->flags & g2d_exa_dst_userptr)
+		userptr_unref(g2dPriv, pDstPixmap);
 
 	free(copyOp);
 
