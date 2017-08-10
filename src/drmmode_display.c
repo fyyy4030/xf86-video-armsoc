@@ -407,10 +407,6 @@ done_setting:
 		drmmode_output_dpms(output, DPMSModeOn);
 	}
 
-	/* if hw cursor is initialized, reload it */
-	if (drmmode->cursor)
-		xf86_reload_cursors(pScrn->pScreen);
-
 cleanup:
 	if (newcrtc)
 		drmModeFreeCrtc(newcrtc);
